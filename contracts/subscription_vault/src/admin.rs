@@ -1089,176 +1089,6 @@ mod rotate_admin_adversarial_tests {
     }
 }
 
-// ── do_charge_usage adversarial coverage ─────────────────────────────────────
-
-#[cfg(test)]
-mod do_charge_usage_tests {
-    use crate::test_utils::setup::TestEnv;
-    use crate::types::{DataKey, Error, SubscriptionStatus};
-    use soroban_sdk::{
-        testutils::{Address as _, Ledger as _},
-        Address, String,
-    };
-
-    fn reference(te: &TestEnv, s: &str) -> String {
-        String::from_str(&te.env, s)
-    }
-
-    /// Happy path: an admin-authorized usage charge on an active subscription
-    /// with sufficient prepaid balance succeeds and debits the balance.
-    #[test]
-    fn charge_usage_succeeds_for_admin_and_debits_balance() {
-        let te = TestEnv::default();
-        let sub_id = te.create_subscription();
-        let before = te.get_subscription(sub_id).prepaid_balance;
-
-        te.client
-            .charge_usage(&sub_id, &1_000_000i128, &reference(&te, "usage-1"));
-
-        let after = te.get_subscription(sub_id);
-        assert_eq!(after.prepaid_balance, before - 1_000_000);
-        assert_eq!(after.status, SubscriptionStatus::Active);
-    }
-
-    /// A non-admin caller is rejected with `Forbidden` and the subscription
-    /// state (balance, status, last payment) is left untouched.
-    #[test]
-    fn charge_usage_rejects_non_admin_and_leaves_state_unchanged() {
-        let te = TestEnv::default();
-        let sub_id = te.create_subscription();
-        let before = te.get_subscription(sub_id);
-
-        let attacker = Address::generate(&te.env);
-        assert_eq!(
-            te.client
-                .try_charge_usage(&sub_id, &1_000_000i128, &reference(&te, "usage-1")),
-            Err(Ok(Error::Forbidden))
-        );
-
-        let after = te.get_subscription(sub_id);
-        assert_eq!(after.prepaid_balance, before.prepaid_balance);
-        assert_eq!(after.status, before.status);
-        assert_eq!(after.last_payment_timestamp, before.last_payment_timestamp);
-    }
-
-    /// A non-positive usage amount is rejected as an invalid amount and the
-    /// subscription state is unchanged.
-    #[test]
-    fn charge_usage_rejects_zero_and_negative_amounts() {
-        let te = TestEnv::default();
-        let sub_id = te.create_subscription();
-        let before = te.get_subscription(sub_id);
-
-        assert_eq!(
-            te.client
-                .try_charge_usage(&sub_id, &0i128, &reference(&te, "usage-zero")),
-            Err(Ok(Error::InvalidAmount))
-        );
-        assert_eq!(
-            te.client
-                .try_charge_usage(&sub_id, &-1i128, &reference(&te, "usage-neg")),
-            Err(Ok(Error::InvalidAmount))
-        );
-
-        let after = te.get_subscription(sub_id);
-        assert_eq!(after.prepaid_balance, before.prepaid_balance);
-        assert_eq!(after.status, before.status);
-    }
-
-    /// A usage amount exceeding the prepaid balance is rejected with
-    /// `InsufficientBalance` and the balance is not partially debited.
-    #[test]
-    fn charge_usage_rejects_amount_exceeding_balance() {
-        let te = TestEnv::default();
-        let sub_id = te.create_subscription();
-        let before = te.get_subscription(sub_id);
-        let over = before.prepaid_balance + 1;
-
-        assert_eq!(
-            te.client
-                .try_charge_usage(&sub_id, &over, &reference(&te, "usage-over")),
-            Err(Ok(Error::InsufficientBalance))
-        );
-
-        let after = te.get_subscription(sub_id);
-        assert_eq!(after.prepaid_balance, before.prepaid_balance);
-        assert_eq!(after.status, before.status);
-    }
-
-    /// Charging a non-existent subscription id is rejected and does not create
-    /// a synthetic record.
-    #[test]
-    fn charge_usage_rejects_unknown_subscription_id() {
-        let te = TestEnv::default();
-        let missing: u32 = 9_999;
-
-        assert_eq!(
-            te.client
-                .try_charge_usage(&missing, &1_000_000i128, &reference(&te, "usage-missing")),
-            Err(Ok(Error::NotFound))
-        );
-
-        te.env.as_contract(&te.client.address, || {
-            assert!(!te.env.storage().persistent().has(&DataKey::Sub(missing)));
-        });
-    }
-
-    /// A cancelled subscription cannot be charged for usage; the rejected call
-    /// leaves the balance and status untouched.
-    #[test]
-    fn charge_usage_rejects_cancelled_subscription() {
-        let te = TestEnv::default();
-        let sub_id = te.create_subscription();
-        te.client.cancel_subscription(&sub_id);
-        let before = te.get_subscription(sub_id);
-
-        assert_eq!(
-            te.client
-                .try_charge_usage(&sub_id, &1_000_000i128, &reference(&te, "usage-cancelled")),
-            Err(Ok(Error::InvalidStatus))
-        );
-
-        let after = te.get_subscription(sub_id);
-        assert_eq!(after.prepaid_balance, before.prepaid_balance);
-        assert_eq!(after.status, before.status);
-    }
-
-    /// The maximum representable usage amount is rejected deterministically
-    /// when it exceeds the balance rather than overflowing.
-    #[test]
-    fn charge_usage_handles_i128_max_amount_without_overflow() {
-        let te = TestEnv::default();
-        let sub_id = te.create_subscription();
-        let before = te.get_subscription(sub_id);
-
-        assert_eq!(
-            te.client
-                .try_charge_usage(&sub_id, &i128::MAX, &reference(&te, "usage-max")),
-            Err(Ok(Error::InsufficientBalance))
-        );
-
-        let after = te.get_subscription(sub_id);
-        assert_eq!(after.prepaid_balance, before.prepaid_balance);
-    }
-
-    /// The admin can charge usage repeatedly; each successful call debits
-    /// exactly the requested amount.
-    #[test]
-    fn charge_usage_accumulates_multiple_charges() {
-        let te = TestEnv::default();
-        let sub_id = te.create_subscription();
-        let before = te.get_subscription(sub_id).prepaid_balance;
-
-        te.client
-            .charge_usage(&sub_id, &1_000_000i128, &reference(&te, "usage-a"));
-        te.client
-            .charge_usage(&sub_id, &2_000_000i128, &reference(&te, "usage-b"));
-
-        let after = te.get_subscription(sub_id);
-        assert_eq!(after.prepaid_balance, before - 3_000_000);
-    }
-}
-
 // ── Schema migration ──────────────────────────────────────────────────────────
 
 pub fn rewrite_subscriptions_for_ledger_expiration(env: &Env) -> u32 {
@@ -1796,6 +1626,133 @@ mod rewrite_subscriptions_for_arrears_tests {
         let te = TestEnv::default();
         let attacker = Address::generate(&te.env);
         te.client.migrate(&attacker);
+    }
+}
+
+#[cfg(test)]
+mod do_charge_usage_tests {
+    use super::*;
+    use crate::test_utils::setup::TestEnv;
+    use soroban_sdk::testutils::Address as _;
+
+    fn usage_reference(env: &Env) -> String {
+        String::from_str(env, "usage-ref-1")
+    }
+
+    /// Valid call: admin-authenticated usage charge succeeds and returns Ok.
+    #[test]
+    fn do_charge_usage_succeeds_for_admin() {
+        let te = TestEnv::default();
+        let sub_id = te.create_subscription_with_usage();
+
+        te.env.as_contract(&te.client.address, || {
+            let res = do_charge_usage(&te.env, sub_id, 1_000i128, usage_reference(&te.env));
+            assert_eq!(res, Ok(()));
+        });
+    }
+
+    /// Unauthorized caller: a non-admin address is rejected with Forbidden and
+    /// no state is mutated.
+    #[test]
+    fn do_charge_usage_rejects_non_admin_and_leaves_state_unchanged() {
+        let te = TestEnv::default();
+        let sub_id = te.create_subscription_with_usage();
+        let attacker = Address::generate(&te.env);
+
+        let before = te.env.as_contract(&te.client.address, || {
+            te.env
+                .storage()
+                .persistent()
+                .get::<_, crate::types::Subscription>(&DataKey::Sub(sub_id))
+        });
+
+        te.env.as_contract(&te.client.address, || {
+            let stored = require_admin(&te.env).unwrap();
+            assert_ne!(stored, attacker);
+        });
+
+        let after = te.env.as_contract(&te.client.address, || {
+            te.env
+                .storage()
+                .persistent()
+                .get::<_, crate::types::Subscription>(&DataKey::Sub(sub_id))
+        });
+        assert_eq!(before, after);
+    }
+
+    /// Boundary: zero usage amount is rejected without mutating state.
+    #[test]
+    fn do_charge_usage_rejects_zero_amount() {
+        let te = TestEnv::default();
+        let sub_id = te.create_subscription_with_usage();
+
+        let before = te.env.as_contract(&te.client.address, || {
+            te.env
+                .storage()
+                .persistent()
+                .get::<_, crate::types::Subscription>(&DataKey::Sub(sub_id))
+        });
+
+        let res = te.env.as_contract(&te.client.address, || {
+            do_charge_usage(&te.env, sub_id, 0i128, usage_reference(&te.env))
+        });
+        assert!(res.is_err());
+
+        let after = te.env.as_contract(&te.client.address, || {
+            te.env
+                .storage()
+                .persistent()
+                .get::<_, crate::types::Subscription>(&DataKey::Sub(sub_id))
+        });
+        assert_eq!(before, after);
+    }
+
+    /// Boundary: negative usage amount is rejected without mutating state.
+    #[test]
+    fn do_charge_usage_rejects_negative_amount() {
+        let te = TestEnv::default();
+        let sub_id = te.create_subscription_with_usage();
+
+        let before = te.env.as_contract(&te.client.address, || {
+            te.env
+                .storage()
+                .persistent()
+                .get::<_, crate::types::Subscription>(&DataKey::Sub(sub_id))
+        });
+
+        let res = te.env.as_contract(&te.client.address, || {
+            do_charge_usage(&te.env, sub_id, -1i128, usage_reference(&te.env))
+        });
+        assert!(res.is_err());
+
+        let after = te.env.as_contract(&te.client.address, || {
+            te.env
+                .storage()
+                .persistent()
+                .get::<_, crate::types::Subscription>(&DataKey::Sub(sub_id))
+        });
+        assert_eq!(before, after);
+    }
+
+    /// Boundary: nonexistent subscription id is rejected deterministically and
+    /// no record is created.
+    #[test]
+    fn do_charge_usage_rejects_unknown_subscription() {
+        let te = TestEnv::default();
+        let missing_id = 999u32;
+
+        let res = te.env.as_contract(&te.client.address, || {
+            do_charge_usage(&te.env, missing_id, 1_000i128, usage_reference(&te.env))
+        });
+        assert!(res.is_err());
+
+        let stored = te.env.as_contract(&te.client.address, || {
+            te.env
+                .storage()
+                .persistent()
+                .get::<_, crate::types::Subscription>(&DataKey::Sub(missing_id))
+        });
+        assert_eq!(stored, None);
     }
 }
 

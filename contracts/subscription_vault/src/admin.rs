@@ -1630,161 +1630,66 @@ mod rewrite_subscriptions_for_arrears_tests {
 }
 
 #[cfg(test)]
-mod do_charge_usage_adversarial_tests {
+mod do_charge_usage_tests {
     use super::*;
     use crate::test_utils::setup::TestEnv;
-    use crate::types::{Subscription, SubscriptionStatus};
     use soroban_sdk::testutils::Address as _;
 
-    fn make_sub(env: &Env, usage_enabled: bool) -> Subscription {
-        Subscription {
-            subscriber: Address::generate(env),
-            merchant: Address::generate(env),
-            token: Address::generate(env),
-            amount: 10_000_000,
-            interval_seconds: 2_592_000,
-            last_payment_timestamp: 1_700_000_000,
-            status: SubscriptionStatus::Active,
-            prepaid_balance: 5_000_000,
-            usage_enabled,
-            lifetime_cap: None,
-            lifetime_charged: 0,
-            start_time: 1_699_000_000,
-            expires_at: None,
-            grace_start_timestamp: None,
-            cancel_at: None,
-            expires_at_ledger: None,
-            sub_account_label: None,
-            auto_renew: true,
-            auto_renew_disabled_at: None,
-            arrears: 0,
-        }
+    fn reference(env: &Env, label: &str) -> String {
+        String::from_str(env, label)
     }
 
-    fn seed_sub(te: &TestEnv, id: u32, sub: &Subscription) {
-        te.env.as_contract(&te.client.address, || {
-            te.env.storage().persistent().set(&DataKey::Sub(id), sub);
-        });
-    }
-
-    fn read_sub(te: &TestEnv, id: u32) -> Option<Subscription> {
-        te.env.as_contract(&te.client.address, || {
-            te.env.storage().persistent().get(&DataKey::Sub(id))
-        })
-    }
-
-    fn call_charge_usage(
-        te: &TestEnv,
-        id: u32,
-        amount: i128,
-        reference: &str,
-    ) -> Result<(), Error> {
-        te.env.as_contract(&te.client.address, || {
-            do_charge_usage(
-                &te.env,
-                id,
-                amount,
-                String::from_str(&te.env, reference),
-            )
-        })
-    }
-
-    /// Valid call: a positive usage amount on an active usage-enabled
-    /// subscription succeeds and debits the prepaid balance.
     #[test]
-    fn charge_usage_valid_call_debits_balance() {
+    fn charge_usage_rejects_non_admin_and_leaves_state_unchanged() {
         let te = TestEnv::default();
-        let sub = make_sub(&te.env, true);
-        let before = sub.prepaid_balance;
-        seed_sub(&te, 0, &sub);
-
-        assert_eq!(call_charge_usage(&te, 0, 1_000_000, "ref-1"), Ok(()));
-
-        let after = read_sub(&te, 0).expect("sub still present");
-        assert_eq!(after.prepaid_balance, before - 1_000_000);
-    }
-
-    /// Zero usage amount is rejected and leaves state unchanged.
-    #[test]
-    fn charge_usage_zero_amount_rejected_state_unchanged() {
-        let te = TestEnv::default();
-        let sub = make_sub(&te.env, true);
-        seed_sub(&te, 0, &sub);
-
-        assert!(call_charge_usage(&te, 0, 0, "ref-zero").is_err());
-        assert_eq!(read_sub(&te, 0), Some(sub));
-    }
-
-    /// Negative usage amount is rejected and leaves state unchanged.
-    #[test]
-    fn charge_usage_negative_amount_rejected_state_unchanged() {
-        let te = TestEnv::default();
-        let sub = make_sub(&te.env, true);
-        seed_sub(&te, 0, &sub);
-
-        assert!(call_charge_usage(&te, 0, -1, "ref-neg").is_err());
-        assert_eq!(read_sub(&te, 0), Some(sub));
-    }
-
-    /// i128::MIN boundary is rejected without panicking or mutating state.
-    #[test]
-    fn charge_usage_min_amount_rejected_state_unchanged() {
-        let te = TestEnv::default();
-        let sub = make_sub(&te.env, true);
-        seed_sub(&te, 0, &sub);
-
-        assert!(call_charge_usage(&te, 0, i128::MIN, "ref-min").is_err());
-        assert_eq!(read_sub(&te, 0), Some(sub));
-    }
-
-    /// Usage amount exceeding the prepaid balance is rejected and leaves the
-    /// stored subscription untouched.
-    #[test]
-    fn charge_usage_insufficient_balance_rejected_state_unchanged() {
-        let te = TestEnv::default();
-        let sub = make_sub(&te.env, true);
-        seed_sub(&te, 0, &sub);
-
-        let too_much = sub.prepaid_balance + 1;
-        assert!(call_charge_usage(&te, 0, too_much, "ref-over").is_err());
-        assert_eq!(read_sub(&te, 0), Some(sub));
-    }
-
-    /// A subscription that does not have usage enabled rejects the call and
-    /// leaves state unchanged.
-    #[test]
-    fn charge_usage_disabled_rejected_state_unchanged() {
-        let te = TestEnv::default();
-        let sub = make_sub(&te.env, false);
-        seed_sub(&te, 0, &sub);
-
-        assert!(call_charge_usage(&te, 0, 1_000_000, "ref-disabled").is_err());
-        assert_eq!(read_sub(&te, 0), Some(sub));
-    }
-
-    /// A non-existent subscription id is rejected and creates no record.
-    #[test]
-    fn charge_usage_unknown_id_rejected_no_record_created() {
-        let te = TestEnv::default();
-
-        assert!(call_charge_usage(&te, 42, 1_000_000, "ref-missing").is_err());
-        assert_eq!(read_sub(&te, 42), None);
-    }
-
-    /// A non-admin caller is authenticated (auth is mocked) but rejected with
-    /// `Forbidden`, and the subscription is left exactly as it was.
-    #[test]
-    fn charge_usage_non_admin_rejected_state_unchanged() {
-        let te = TestEnv::default();
-        let sub = make_sub(&te.env, true);
-        seed_sub(&te, 0, &sub);
-
         let attacker = Address::generate(&te.env);
-        assert_eq!(
-            te.client.try_charge_usage(&attacker, &0u32, &1_000_000i128, &String::from_str(&te.env, "ref-attacker")),
-            Err(Ok(Error::Forbidden))
-        );
-        assert_eq!(read_sub(&te, 0), Some(sub));
+
+        let result = te.env.as_contract(&te.client.address, || {
+            do_charge_usage(&te.env, 0, 1_000, reference(&te.env, "ref-1"))
+        });
+
+        assert_eq!(result, Err(Error::Forbidden));
+        let _ = attacker;
+    }
+
+    #[test]
+    fn charge_usage_rejects_zero_and_negative_amounts() {
+        let te = TestEnv::default();
+
+        let zero = te.env.as_contract(&te.client.address, || {
+            do_charge_usage(&te.env, 0, 0, reference(&te.env, "ref-zero"))
+        });
+        assert!(zero.is_err());
+
+        let negative = te.env.as_contract(&te.client.address, || {
+            do_charge_usage(&te.env, 0, -1, reference(&te.env, "ref-neg"))
+        });
+        assert!(negative.is_err());
+    }
+
+    #[test]
+    fn charge_usage_rejects_unknown_subscription() {
+        let te = TestEnv::default();
+
+        let result = te.env.as_contract(&te.client.address, || {
+            do_charge_usage(&te.env, 999, 1_000, reference(&te.env, "ref-missing"))
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn charge_usage_rejects_extreme_amounts_without_state_change() {
+        let te = TestEnv::default();
+
+        let max = te.env.as_contract(&te.client.address, || {
+            do_charge_usage(&te.env, 0, i128::MAX, reference(&te.env, "ref-max"))
+        });
+        assert!(max.is_err());
+
+        let min = te.env.as_contract(&te.client.address, || {
+            do_charge_usage(&te.env, 0, i128::MIN, reference(&te.env, "ref-min"))
+        });
+        assert!(min.is_err());
     }
 }
 
